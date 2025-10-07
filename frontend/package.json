@@ -1,6 +1,6 @@
 {
   "name": "web-scraper-frontend",
-  "version": "1.0.0",
+  "version": "0.0.1",
   "description": "Beautiful Vue 3 frontend for Web Scraper API",
   "type": "module",
   "scripts": {
