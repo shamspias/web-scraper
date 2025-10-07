@@ -1,0 +1,10 @@
+fastapi
+uvicorn[standard]
+playwright
+beautifulsoup4
+lxml
+pydantic
+pydantic-settings
+python-multipart
+aiofiles
+httpx
