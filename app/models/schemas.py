@@ -1,5 +1,5 @@
 from pydantic import BaseModel, HttpUrl, Field, validator
-from typing import List, Optional, Dict
+from typing import List, Optional, Dict, Any
 from datetime import datetime
 from enum import Enum
 
@@ -14,7 +14,6 @@ class ScrapeStatus(str, Enum):
 class ScrapeRequest(BaseModel):
     url: HttpUrl
     max_depth: Optional[int] = Field(default=3, ge=1, le=10)
-    include_images: Optional[bool] = True
     authorization_token: str = Field(..., min_length=10, description="Your website authorization token")
 
     @validator('url')
@@ -25,25 +24,28 @@ class ScrapeRequest(BaseModel):
         return v
 
 
-class ImageData(BaseModel):
-    url: str
-    alt_text: Optional[str] = None
-    downloaded_path: Optional[str] = None
+class ContentBlock(BaseModel):
+    """Represents a block of content (text or image)"""
+    type: str  # 'text' or 'image'
+    content: Optional[str] = None  # For text blocks
+    url: Optional[str] = None  # For image blocks
+    alt: Optional[str] = None  # For image blocks
+    title: Optional[str] = None  # For image blocks
 
 
 class PageData(BaseModel):
     url: str
     title: Optional[str] = None
-    clean_text: str
-    images: List[ImageData] = []
     metadata: Dict[str, str] = {}
+    structured_content: List[Dict[str, Any]] = []  # List of content blocks with images at positions
+    all_images: List[str] = []  # All image URLs found on page
     scraped_at: datetime = Field(default_factory=datetime.utcnow)
 
 
 class SitemapData(BaseModel):
     total_urls: int
     urls: List[str]
-    structure: Dict[str, List[str]]
+    hierarchy: Dict[str, List[str]] = {}  # Hierarchical structure: parent -> children
 
 
 class ScrapeResponse(BaseModel):
@@ -55,3 +57,16 @@ class ScrapeResponse(BaseModel):
     pages: Optional[List[PageData]] = None
     total_pages_scraped: int = 0
     errors: List[str] = []
+
+
+class JobSummary(BaseModel):
+    """Summary of a completed job loaded from disk"""
+    job_id: str
+    url: str
+    status: ScrapeStatus
+    output_directory: str
+    total_pages_scraped: int
+    total_urls: int
+    total_images: int
+    scraped_at: str
+    errors_count: int
