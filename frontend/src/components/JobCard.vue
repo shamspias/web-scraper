@@ -43,7 +43,7 @@
       </div>
     </div>
 
-    <div v-else-if="job.status === 'completed'" class="grid grid-cols-3 gap-4">
+    <div v-else-if="job.status === 'completed'" class="grid grid-cols-4 gap-3">
       <div class="text-center">
         <p class="text-2xl font-bold text-primary-600">{{ job.total_pages_scraped || 0 }}</p>
         <p class="text-xs text-gray-600">Pages</p>
@@ -55,6 +55,10 @@
       <div class="text-center">
         <p class="text-2xl font-bold text-purple-600">{{ totalImages }}</p>
         <p class="text-xs text-gray-600">Images</p>
+      </div>
+      <div class="text-center">
+        <p class="text-2xl font-bold" :class="failedCount > 0 ? 'text-red-600' : 'text-gray-400'">{{ failedCount }}</p>
+        <p class="text-xs text-gray-600">Failed</p>
       </div>
     </div>
 
@@ -97,7 +101,11 @@ const progressPercentage = computed(() => {
 
 const totalImages = computed(() => {
   if (!props.job.pages) return 0
-  return props.job.pages.reduce((sum, page) => sum + (page.images?.length || 0), 0)
+  return props.job.pages.reduce((sum, page) => sum + (page.all_images?.length || 0), 0)
+})
+
+const failedCount = computed(() => {
+  return props.job.failed_urls?.length || 0
 })
 
 function getDomainFromUrl(url) {
@@ -114,4 +122,3 @@ function formatDate(date) {
   return new Date(date).toLocaleString()
 }
 </script>
-
