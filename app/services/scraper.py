@@ -9,24 +9,35 @@ from pathlib import Path
 import hashlib
 from datetime import datetime
 import json
+import csv
 
-from app.models.schemas import PageData, ImageData, SitemapData
+from app.models.schemas import PageData, SitemapData
 from app.services.content_cleaner import ContentCleaner
 from app.utils.validators import URLValidator
 from config import settings
 
 
 class WebScraper:
-    """Advanced web scraper using Playwright"""
+    """Advanced web scraper using Playwright with hierarchy support"""
 
-    def __init__(self, base_url: str, max_depth: int = 3, include_images: bool = True):
+    # File extensions to skip
+    SKIP_EXTENSIONS = {
+        '.pdf', '.doc', '.docx', '.xls', '.xlsx', '.ppt', '.pptx',
+        '.zip', '.rar', '.tar', '.gz', '.7z',
+        '.jpg', '.jpeg', '.png', '.gif', '.bmp', '.svg', '.webp', '.ico',
+        '.mp4', '.avi', '.mov', '.wmv', '.flv', '.mkv',
+        '.mp3', '.wav', '.ogg', '.flac',
+        '.exe', '.dmg', '.app', '.deb', '.rpm',
+        '.xml', '.json', '.csv', '.txt'
+    }
+
+    def __init__(self, base_url: str, max_depth: int = 3):
         self.base_url = URLValidator.normalize_url(base_url)
         self.base_domain = urlparse(base_url).netloc
         self.max_depth = max_depth
-        self.include_images = include_images
 
         self.visited_urls: Set[str] = set()
-        self.url_queue: List[tuple[str, int]] = [(self.base_url, 0)]
+        self.url_hierarchy: Dict[str, List[str]] = {}  # Parent -> Children mapping
         self.scraped_pages: List[PageData] = []
         self.errors: List[str] = []
 
@@ -34,7 +45,7 @@ class WebScraper:
         self.content_cleaner = ContentCleaner()
         self.validator = URLValidator()
 
-        # Create output directory based on website URL
+        # Create output directory
         self.directory_name = self._create_url_based_directory()
         self.output_dir = Path(settings.OUTPUT_DIR) / self.directory_name
         self.output_dir.mkdir(parents=True, exist_ok=True)
@@ -43,13 +54,25 @@ class WebScraper:
 
     def _create_url_based_directory(self) -> str:
         """Create directory name based on URL and timestamp"""
-        # Get clean domain name
         domain = self.validator.url_to_directory_name(self.base_url)
-
-        # Add timestamp for uniqueness
         timestamp = datetime.utcnow().strftime('%Y%m%d_%H%M%S')
-
         return f"{domain}_{timestamp}"
+
+    def _is_valid_webpage_url(self, url: str) -> bool:
+        """Check if URL is a valid webpage (not a file)"""
+        parsed = urlparse(url)
+        path = parsed.path.lower()
+
+        # Check for file extensions
+        for ext in self.SKIP_EXTENSIONS:
+            if path.endswith(ext):
+                return False
+
+        # Check if it's a valid HTTP(S) URL
+        if parsed.scheme not in ['http', 'https']:
+            return False
+
+        return True
 
     async def initialize_browser(self):
         """Initialize Playwright browser"""
@@ -64,15 +87,13 @@ class WebScraper:
         if self.browser:
             await self.browser.close()
 
-    async def discover_urls(self, page: Page, current_url: str, depth: int) -> List[str]:
+    async def discover_urls(self, page: Page, current_url: str) -> List[str]:
         """Discover all URLs on a page"""
         discovered = []
 
         try:
-            # Wait for page to load
             await page.wait_for_load_state('networkidle', timeout=settings.PAGE_TIMEOUT)
 
-            # Extract all links
             links = await page.evaluate("""
                 () => {
                     const links = Array.from(document.querySelectorAll('a[href]'));
@@ -84,10 +105,10 @@ class WebScraper:
                 try:
                     normalized = self.validator.normalize_url(link)
 
-                    # Only include same-domain links
                     if (self.validator.is_same_domain(normalized, self.base_url) and
                             normalized not in self.visited_urls and
-                            self.validator.is_valid_url(normalized)):
+                            self.validator.is_valid_url(normalized) and
+                            self._is_valid_webpage_url(normalized)):
                         discovered.append(normalized)
                 except Exception:
                     continue
@@ -95,129 +116,47 @@ class WebScraper:
         except Exception as e:
             self.errors.append(f"URL discovery error on {current_url}: {str(e)}")
 
-        return list(set(discovered))  # Remove duplicates
+        return list(set(discovered))
 
-    async def download_image(self, image_url: str, page_url: str) -> Optional[str]:
-        """Download image and save locally"""
-        try:
-            import httpx
-
-            # Create images directory
-            images_dir = self.output_dir / "images"
-            images_dir.mkdir(exist_ok=True)
-
-            # Generate filename
-            url_hash = hashlib.md5(image_url.encode()).hexdigest()[:12]
-            ext = Path(urlparse(image_url).path).suffix or '.jpg'
-            if ext not in ['.jpg', '.jpeg', '.png', '.gif', '.webp', '.svg']:
-                ext = '.jpg'
-            filename = f"{url_hash}{ext}"
-            filepath = images_dir / filename
-
-            # Skip if already downloaded
-            if filepath.exists():
-                return str(filepath.relative_to(self.output_dir))
-
-            # Download image
-            async with httpx.AsyncClient(timeout=10) as client:
-                response = await client.get(image_url, follow_redirects=True)
-                if response.status_code == 200 and len(response.content) > 0:
-                    async with aiofiles.open(filepath, 'wb') as f:
-                        await f.write(response.content)
-                    return str(filepath.relative_to(self.output_dir))
-
-        except Exception as e:
-            self.errors.append(f"Image download error {image_url}: {str(e)}")
-
-        return None
-
-    async def scrape_page(self, url: str) -> Optional[PageData]:
-        """Scrape a single page"""
-        try:
-            context = await self.browser.new_context(
-                user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
-            )
-            page = await context.new_page()
-
-            # Navigate to page
-            response = await page.goto(url, wait_until='networkidle', timeout=settings.PAGE_TIMEOUT)
-
-            if not response or response.status not in [200, 304]:
-                raise Exception(f"Failed to load page: HTTP {response.status if response else 'No response'}")
-
-            # Get HTML content
-            html_content = await page.content()
-
-            # Extract clean text
-            clean_text = self.content_cleaner.clean_html_to_text(html_content)
-
-            # Extract metadata
-            metadata = self.content_cleaner.extract_metadata(html_content)
-
-            # Extract images
-            images_data = []
-            if self.include_images:
-                images = self.content_cleaner.extract_images(html_content, url)
-
-                for img in images[:30]:  # Limit to 30 images per page
-                    downloaded_path = None
-                    if settings.SAVE_IMAGES:
-                        downloaded_path = await self.download_image(img['url'], url)
-
-                    images_data.append(ImageData(
-                        url=img['url'],
-                        alt_text=img['alt_text'],
-                        downloaded_path=downloaded_path
-                    ))
-
-            await context.close()
-
-            return PageData(
-                url=url,
-                title=metadata.get('title'),
-                clean_text=clean_text,
-                images=images_data,
-                metadata=metadata
-            )
-
-        except Exception as e:
-            self.errors.append(f"Page scraping error {url}: {str(e)}")
-            return None
-
-    async def build_sitemap(self) -> SitemapData:
-        """Build complete sitemap by crawling the website"""
+    async def build_sitemap_hierarchy(self) -> SitemapData:
+        """Build hierarchical sitemap by crawling the website"""
         if not self.browser:
             await self.initialize_browser()
 
-        structure: Dict[str, List[str]] = {}
         all_urls: Set[str] = {self.base_url}
+        url_queue: List[tuple[str, int, Optional[str]]] = [(self.base_url, 0, None)]
 
-        print(f"🗺️  Building sitemap (max depth: {self.max_depth})...")
+        print(f"🗺️  Building hierarchical sitemap (max depth: {self.max_depth})...")
 
-        while self.url_queue and len(self.visited_urls) < 500:  # Safety limit
-            current_url, depth = self.url_queue.pop(0)
+        while url_queue and len(self.visited_urls) < 500:
+            current_url, depth, parent_url = url_queue.pop(0)
 
             if current_url in self.visited_urls or depth > self.max_depth:
                 continue
 
             self.visited_urls.add(current_url)
-            print(f"📍 Discovering: {current_url} (depth: {depth})")
+            print(f"📍 Depth {depth}: {current_url}")
 
             try:
                 context = await self.browser.new_context()
                 page = await context.new_page()
                 await page.goto(current_url, wait_until='domcontentloaded', timeout=settings.PAGE_TIMEOUT)
 
-                # Discover new URLs
-                discovered = await self.discover_urls(page, current_url, depth)
+                discovered = await self.discover_urls(page, current_url)
 
-                # Add to structure
-                structure[current_url] = discovered
+                # Build hierarchy
+                if parent_url:
+                    if parent_url not in self.url_hierarchy:
+                        self.url_hierarchy[parent_url] = []
+                    self.url_hierarchy[parent_url].append(current_url)
 
-                # Add to queue
+                if current_url not in self.url_hierarchy:
+                    self.url_hierarchy[current_url] = []
+
+                # Add discovered URLs to hierarchy
                 for url in discovered:
                     if url not in self.visited_urls:
-                        self.url_queue.append((url, depth + 1))
+                        url_queue.append((url, depth + 1, current_url))
                         all_urls.add(url)
 
                 await context.close()
@@ -226,11 +165,50 @@ class WebScraper:
                 self.errors.append(f"Sitemap building error {current_url}: {str(e)}")
 
         print(f"✅ Sitemap complete: {len(all_urls)} URLs discovered")
+
         return SitemapData(
             total_urls=len(all_urls),
             urls=list(all_urls),
-            structure=structure
+            hierarchy=self.url_hierarchy
         )
+
+    async def scrape_page(self, url: str) -> Optional[PageData]:
+        """Scrape a single page with structured content"""
+        try:
+            context = await self.browser.new_context(
+                user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+            )
+            page = await context.new_page()
+
+            response = await page.goto(url, wait_until='networkidle', timeout=settings.PAGE_TIMEOUT)
+
+            if not response or response.status not in [200, 304]:
+                raise Exception(f"Failed to load page: HTTP {response.status if response else 'No response'}")
+
+            html_content = await page.content()
+
+            # Extract metadata
+            metadata = self.content_cleaner.extract_metadata(html_content)
+
+            # Extract structured content with images at their positions
+            structured_content = self.content_cleaner.clean_html_to_structured_content(html_content, url)
+
+            # Extract all image URLs
+            all_images = self.content_cleaner.extract_all_images(html_content, url)
+
+            await context.close()
+
+            return PageData(
+                url=url,
+                title=metadata.get('title'),
+                metadata=metadata,
+                structured_content=structured_content,
+                all_images=all_images
+            )
+
+        except Exception as e:
+            self.errors.append(f"Page scraping error {url}: {str(e)}")
+            return None
 
     async def scrape_all_pages(self, urls: List[str]) -> List[PageData]:
         """Scrape all discovered pages"""
@@ -247,7 +225,6 @@ class WebScraper:
         tasks = [scrape_with_limit(url) for url in urls]
         results = await asyncio.gather(*tasks, return_exceptions=True)
 
-        # Filter out None and exceptions
         scraped = [r for r in results if isinstance(r, PageData)]
 
         print(f"✅ Scraped {len(scraped)} pages successfully")
@@ -259,8 +236,8 @@ class WebScraper:
             print(f"🚀 Starting scrape for: {self.base_url}")
             await self.initialize_browser()
 
-            # Step 1: Build sitemap
-            sitemap = await self.build_sitemap()
+            # Step 1: Build hierarchical sitemap FIRST
+            sitemap = await self.build_sitemap_hierarchy()
 
             # Step 2: Scrape all pages
             scraped_pages = await self.scrape_all_pages(sitemap.urls)
@@ -282,60 +259,89 @@ class WebScraper:
             await self.close_browser()
 
     async def _save_results(self, sitemap: SitemapData, pages: List[PageData]):
-        """Save scraping results to files"""
-        # Save sitemap
+        """Save scraping results to JSON and CSV"""
+
+        # Save hierarchical sitemap as JSON
         sitemap_file = self.output_dir / "sitemap.json"
         async with aiofiles.open(sitemap_file, 'w', encoding='utf-8') as f:
-            await f.write(json.dumps(sitemap.dict(), indent=2, default=str))
+            await f.write(json.dumps({
+                'total_urls': sitemap.total_urls,
+                'base_url': self.base_url,
+                'scraped_at': datetime.utcnow().isoformat(),
+                'hierarchy': sitemap.hierarchy,
+                'urls': sitemap.urls
+            }, indent=2, default=str))
 
-        # Save all pages data
-        pages_file = self.output_dir / "all_pages.json"
-        async with aiofiles.open(pages_file, 'w', encoding='utf-8') as f:
-            await f.write(json.dumps([p.dict() for p in pages], indent=2, default=str))
+        # Save all pages as JSON
+        pages_json_file = self.output_dir / "pages.json"
+        pages_data = []
 
-        # Save individual page texts
-        texts_dir = self.output_dir / "pages"
-        texts_dir.mkdir(exist_ok=True)
+        for page in pages:
+            page_dict = {
+                'url': page.url,
+                'title': page.title,
+                'metadata': page.metadata,
+                'structured_content': page.structured_content,
+                'all_images': page.all_images,
+                'scraped_at': page.scraped_at.isoformat() if page.scraped_at else None
+            }
+            pages_data.append(page_dict)
 
-        for i, page in enumerate(pages, 1):
-            # Create safe filename from URL
-            url_slug = re.sub(r'[^\w\-]', '_', page.url.split('/')[-1] or 'index')[:50]
-            text_file = texts_dir / f"{i:04d}_{url_slug}.txt"
+        async with aiofiles.open(pages_json_file, 'w', encoding='utf-8') as f:
+            await f.write(json.dumps(pages_data, indent=2, ensure_ascii=False))
 
-            async with aiofiles.open(text_file, 'w', encoding='utf-8') as f:
-                await f.write(f"URL: {page.url}\n")
-                await f.write(f"Title: {page.title or 'N/A'}\n")
-                await f.write(f"Scraped: {page.scraped_at}\n")
-                await f.write("=" * 80 + "\n\n")
-                await f.write(page.clean_text)
+        # Save pages as CSV
+        pages_csv_file = self.output_dir / "pages.csv"
+        async with aiofiles.open(pages_csv_file, 'w', encoding='utf-8', newline='') as f:
+            if pages:
+                fieldnames = ['url', 'title', 'description', 'keywords', 'author',
+                              'image_count', 'content_blocks', 'full_content', 'all_images']
 
-                if page.images:
-                    await f.write(f"\n\n{'=' * 80}\n")
-                    await f.write(f"IMAGES ({len(page.images)}):\n")
-                    await f.write("=" * 80 + "\n\n")
-                    for img in page.images:
-                        await f.write(f"URL: {img.url}\n")
-                        if img.alt_text:
-                            await f.write(f"Alt: {img.alt_text}\n")
-                        if img.downloaded_path:
-                            await f.write(f"File: {img.downloaded_path}\n")
-                        await f.write("\n")
+                csv_data = []
+                csv_data.append(','.join(f'"{field}"' for field in fieldnames) + '\n')
+
+                for page in pages:
+                    # Combine structured content into readable text
+                    full_content = ''
+                    for block in page.structured_content:
+                        if block['type'] == 'text':
+                            full_content += block['content'] + ' '
+                        else:
+                            full_content += f"[IMAGE: {block['url']}] "
+
+                    row = [
+                        page.url,
+                        page.title or '',
+                        page.metadata.get('description', ''),
+                        page.metadata.get('keywords', ''),
+                        page.metadata.get('author', ''),
+                        str(len(page.all_images)),
+                        str(len(page.structured_content)),
+                        full_content.strip(),
+                        '; '.join(page.all_images)
+                    ]
+
+                    # Escape and quote CSV values
+                    escaped_row = ','.join(f'"{str(val).replace(chr(34), chr(34) + chr(34))}"' for val in row)
+                    csv_data.append(escaped_row + '\n')
+
+                await f.writelines(csv_data)
 
         # Save summary
-        summary_file = self.output_dir / "summary.txt"
-        async with aiofiles.open(summary_file, 'w', encoding='utf-8') as f:
-            await f.write(f"SCRAPING SUMMARY\n")
-            await f.write("=" * 80 + "\n\n")
-            await f.write(f"Website: {self.base_url}\n")
-            await f.write(f"Scraped: {datetime.utcnow().isoformat()}\n")
-            await f.write(f"Total URLs discovered: {len(sitemap.urls)}\n")
-            await f.write(f"Pages scraped: {len(pages)}\n")
-            await f.write(f"Images downloaded: {sum(len(p.images) for p in pages)}\n")
-            await f.write(f"Errors: {len(self.errors)}\n")
-            await f.write("\n")
+        summary_file = self.output_dir / "summary.json"
+        summary = {
+            'website': self.base_url,
+            'scraped_at': datetime.utcnow().isoformat(),
+            'total_urls_discovered': len(sitemap.urls),
+            'pages_scraped': len(pages),
+            'total_images_found': sum(len(p.all_images) for p in pages),
+            'errors_count': len(self.errors),
+            'errors': self.errors[:50],  # Limit errors
+            'max_depth': self.max_depth,
+            'output_formats': ['JSON', 'CSV']
+        }
 
-            if self.errors:
-                await f.write("ERRORS:\n")
-                await f.write("-" * 80 + "\n")
-                for error in self.errors:
-                    await f.write(f"- {error}\n")
+        async with aiofiles.open(summary_file, 'w', encoding='utf-8') as f:
+            await f.write(json.dumps(summary, indent=2))
+
+        print(f"💾 Saved: sitemap.json, pages.json, pages.csv, summary.json")
