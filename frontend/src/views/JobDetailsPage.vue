@@ -119,9 +119,9 @@
             <p class="text-2xl font-bold text-purple-900 mt-1">{{ totalImages }}</p>
           </div>
 
-          <div class="bg-gradient-to-br from-amber-50 to-orange-50 p-4 rounded-lg border border-amber-200">
-            <p class="text-sm font-medium text-amber-700">Errors</p>
-            <p class="text-2xl font-bold text-amber-900 mt-1">{{ job.errors?.length || 0 }}</p>
+          <div class="bg-gradient-to-br from-red-50 to-pink-50 p-4 rounded-lg border border-red-200">
+            <p class="text-sm font-medium text-red-700">Failed URLs</p>
+            <p class="text-2xl font-bold text-red-900 mt-1">{{ job.failed_urls?.length || 0 }}</p>
           </div>
         </div>
 
@@ -140,6 +140,14 @@
           </div>
         </div>
       </div>
+
+      <!-- Failed URLs Section -->
+      <FailedUrlsSection
+          v-if="job.failed_urls && job.failed_urls.length > 0"
+          :failed-urls="job.failed_urls"
+          :job-id="job.job_id"
+          @retry="handleRetry"
+      />
 
       <!-- Output Directory Info -->
       <div v-if="job.output_directory && job.status === 'completed'" class="card animate-slide-up">
@@ -218,21 +226,21 @@
         </button>
       </div>
 
-      <!-- Errors -->
+      <!-- General Errors -->
       <div v-if="job.errors && job.errors.length > 0" class="card animate-slide-up">
-        <h2 class="text-lg font-bold text-red-900 mb-4 flex items-center">
-          <svg class="w-5 h-5 mr-2 text-red-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+        <h2 class="text-lg font-bold text-orange-900 mb-4 flex items-center">
+          <svg class="w-5 h-5 mr-2 text-orange-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
                   d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/>
           </svg>
-          Errors ({{ job.errors.length }})
+          General Errors ({{ job.errors.length }})
         </h2>
 
         <div class="space-y-2 max-h-64 overflow-y-auto">
           <div
               v-for="(error, index) in job.errors"
               :key="index"
-              class="bg-red-50 border-l-4 border-red-400 p-3 rounded text-sm text-red-800"
+              class="bg-orange-50 border-l-4 border-orange-400 p-3 rounded text-sm text-orange-800"
           >
             {{ error }}
           </div>
@@ -262,6 +270,7 @@ import {useRoute, useRouter} from 'vue-router'
 import {useScraperStore} from '../stores/scraper'
 import StatusBadge from '../components/StatusBadge.vue'
 import PagePreview from '../components/PagePreview.vue'
+import FailedUrlsSection from '../components/FailedUrlsSection.vue'
 
 const route = useRoute()
 const router = useRouter()
@@ -285,7 +294,7 @@ const progressPercentage = computed(() => {
 
 const totalImages = computed(() => {
   if (!job.value?.pages) return 0
-  return job.value.pages.reduce((sum, page) => sum + (page.images?.length || 0), 0)
+  return job.value.pages.reduce((sum, page) => sum + (page.all_images?.length || 0), 0)
 })
 
 onMounted(async () => {
@@ -316,6 +325,18 @@ async function loadJob() {
 
 async function refreshJob() {
   await loadJob()
+}
+
+async function handleRetry(urls) {
+  try {
+    await scraperStore.retryFailedUrls(job.value.job_id, urls)
+
+    // Start polling
+    startPolling()
+  } catch (error) {
+    console.error('Failed to retry URLs:', error)
+    alert('Failed to retry URLs. Please check console for details.')
+  }
 }
 
 function startPolling() {
