@@ -48,5 +48,9 @@ export default {
 
     listJobs() {
         return apiClient.get('/jobs')
+    },
+
+    retryFailedUrls(jobId, urls) {
+        return apiClient.post(`/scrape/${jobId}/retry`, {urls})
     }
 }
