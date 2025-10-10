@@ -14,11 +14,11 @@
 
         <div class="flex items-center space-x-4 flex-shrink-0">
           <div class="text-center">
-            <p class="text-lg font-bold text-gray-900">{{ wordCount }}</p>
-            <p class="text-xs text-gray-500">words</p>
+            <p class="text-lg font-bold text-gray-900">{{ contentBlocksCount }}</p>
+            <p class="text-xs text-gray-500">blocks</p>
           </div>
-          <div v-if="page.images && page.images.length > 0" class="text-center">
-            <p class="text-lg font-bold text-purple-600">{{ page.images.length }}</p>
+          <div v-if="page.all_images && page.all_images.length > 0" class="text-center">
+            <p class="text-lg font-bold text-purple-600">{{ page.all_images.length }}</p>
             <p class="text-xs text-gray-500">images</p>
           </div>
         </div>
@@ -31,6 +31,7 @@
     </button>
 
     <div v-if="expanded" class="border-t border-gray-200 p-4 bg-gray-50 space-y-4">
+      <!-- Metadata -->
       <div v-if="page.metadata && Object.keys(page.metadata).length > 0" class="space-y-2">
         <h5 class="font-semibold text-gray-900 text-sm">Metadata</h5>
         <div class="grid grid-cols-1 md:grid-cols-2 gap-2">
@@ -41,43 +42,86 @@
         </div>
       </div>
 
+      <!-- Structured Content with Images at Positions -->
       <div>
-        <h5 class="font-semibold text-gray-900 text-sm mb-2">Text Content</h5>
-        <div class="bg-white p-4 rounded border border-gray-200 max-h-64 overflow-y-auto">
-          <p class="text-sm text-gray-700 whitespace-pre-line">{{ textPreview }}</p>
-          <button v-if="page.clean_text && page.clean_text.length > 500" @click="showFullText = !showFullText"
-                  class="mt-2 text-primary-600 hover:text-primary-700 text-sm font-medium">
-            {{ showFullText ? 'Show Less' : 'Show More' }}
+        <div class="flex items-center justify-between mb-2">
+          <h5 class="font-semibold text-gray-900 text-sm">Structured Content</h5>
+          <span class="text-xs text-gray-500">{{ contentBlocksCount }} blocks ({{
+              textBlocksCount
+            }} text, {{ imageBlocksCount }} images)</span>
+        </div>
+
+        <div class="bg-white p-4 rounded border border-gray-200 space-y-3 max-h-96 overflow-y-auto">
+          <div v-for="(block, blockIndex) in displayedContent" :key="blockIndex">
+            <!-- Text Block -->
+            <div v-if="block.type === 'text'" class="text-sm text-gray-700">
+              <p class="whitespace-pre-wrap">{{ block.content }}</p>
+            </div>
+
+            <!-- Image Block -->
+            <div v-else-if="block.type === 'image'" class="bg-blue-50 border-l-4 border-blue-500 p-3 rounded">
+              <div class="flex items-start space-x-3">
+                <svg class="w-5 h-5 text-blue-600 flex-shrink-0 mt-1" fill="none" stroke="currentColor"
+                     viewBox="0 0 24 24">
+                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                        d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z"/>
+                </svg>
+                <div class="flex-1 min-w-0">
+                  <p class="text-xs font-medium text-blue-900 mb-1">IMAGE AT THIS POSITION</p>
+                  <a :href="block.url" target="_blank"
+                     class="text-xs text-blue-600 hover:text-blue-700 hover:underline break-all">
+                    {{ block.url }}
+                  </a>
+                  <p v-if="block.alt" class="text-xs text-gray-600 mt-1">
+                    <span class="font-medium">Alt:</span> {{ block.alt }}
+                  </p>
+                  <p v-if="block.title" class="text-xs text-gray-600">
+                    <span class="font-medium">Title:</span> {{ block.title }}
+                  </p>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <button
+              v-if="page.structured_content && page.structured_content.length > maxDisplayBlocks"
+              @click="showAllContent = !showAllContent"
+              class="w-full mt-2 text-primary-600 hover:text-primary-700 text-sm font-medium py-2 px-4 bg-primary-50 hover:bg-primary-100 rounded transition-colors">
+            {{ showAllContent ? 'Show Less' : `Show All ${page.structured_content.length} Blocks` }}
           </button>
         </div>
       </div>
 
-      <div v-if="page.images && page.images.length > 0">
-        <h5 class="font-semibold text-gray-900 text-sm mb-2">Images ({{ page.images.length }})</h5>
-        <div class="grid grid-cols-2 md:grid-cols-4 gap-3">
-          <div v-for="(image, imgIndex) in page.images.slice(0, 8)" :key="imgIndex"
-               class="bg-white p-2 rounded border border-gray-200 hover:border-primary-300 transition-colors">
-            <div class="aspect-square bg-gray-100 rounded mb-2 flex items-center justify-center overflow-hidden">
-              <img v-if="image.url" :src="image.url" :alt="image.alt_text || 'Image'" class="w-full h-full object-cover"
-                   @error="handleImageError"/>
-              <svg v-else class="w-8 h-8 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+      <!-- All Images List -->
+      <div v-if="page.all_images && page.all_images.length > 0">
+        <h5 class="font-semibold text-gray-900 text-sm mb-2">All Image URLs ({{ page.all_images.length }})</h5>
+        <div class="bg-white p-4 rounded border border-gray-200 max-h-48 overflow-y-auto space-y-2">
+          <div v-for="(imageUrl, imgIndex) in page.all_images.slice(0, showAllImages ? page.all_images.length : 10)"
+               :key="imgIndex"
+               class="flex items-center space-x-2 p-2 bg-gray-50 rounded hover:bg-gray-100 transition-colors">
+            <span class="text-xs font-medium text-gray-500 bg-white px-2 py-1 rounded">{{ imgIndex + 1 }}</span>
+            <a :href="imageUrl" target="_blank"
+               class="text-xs text-primary-600 hover:text-primary-700 hover:underline flex-1 truncate">
+              {{ imageUrl }}
+            </a>
+            <button @click="copyToClipboard(imageUrl)" class="text-gray-400 hover:text-gray-600" title="Copy URL">
+              <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
-                      d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z"/>
+                      d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z"/>
               </svg>
-            </div>
-            <p class="text-xs text-gray-600 truncate" :title="image.alt_text">{{ image.alt_text || 'No alt text' }}</p>
-            <p v-if="image.downloaded_path" class="text-xs text-green-600 mt-1 flex items-center">
-              <svg class="w-3 h-3 mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7"/>
-              </svg>
-              Downloaded
-            </p>
+            </button>
           </div>
+
+          <button
+              v-if="page.all_images.length > 10"
+              @click="showAllImages = !showAllImages"
+              class="w-full text-center text-primary-600 hover:text-primary-700 text-sm font-medium py-2">
+            {{ showAllImages ? 'Show Less' : `Show All ${page.all_images.length} Images` }}
+          </button>
         </div>
-        <p v-if="page.images.length > 8" class="text-sm text-gray-500 mt-2 text-center">+ {{ page.images.length - 8 }}
-          more images</p>
       </div>
 
+      <!-- Timestamp -->
       <div class="text-xs text-gray-500 flex items-center">
         <svg class="w-4 h-4 mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24">
           <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
@@ -104,26 +148,40 @@ const props = defineProps({
 })
 
 const expanded = ref(false)
-const showFullText = ref(false)
+const showAllContent = ref(false)
+const showAllImages = ref(false)
+const maxDisplayBlocks = 20
 
-const wordCount = computed(() => {
-  if (!props.page.clean_text) return 0
-  return props.page.clean_text.split(/\s+/).length
+const contentBlocksCount = computed(() => {
+  return props.page.structured_content?.length || 0
 })
 
-const textPreview = computed(() => {
-  if (!props.page.clean_text) return 'No text content'
-  if (showFullText.value) return props.page.clean_text
-  return props.page.clean_text.slice(0, 500) + (props.page.clean_text.length > 500 ? '...' : '')
+const textBlocksCount = computed(() => {
+  return props.page.structured_content?.filter(b => b.type === 'text').length || 0
 })
 
-function handleImageError(event) {
-  event.target.style.display = 'none'
-}
+const imageBlocksCount = computed(() => {
+  return props.page.structured_content?.filter(b => b.type === 'image').length || 0
+})
+
+const displayedContent = computed(() => {
+  if (!props.page.structured_content) return []
+  if (showAllContent.value) return props.page.structured_content
+  return props.page.structured_content.slice(0, maxDisplayBlocks)
+})
 
 function formatDate(date) {
   if (!date) return 'N/A'
   return new Date(date).toLocaleString()
+}
+
+async function copyToClipboard(text) {
+  try {
+    await navigator.clipboard.writeText(text)
+    alert('URL copied to clipboard!')
+  } catch (err) {
+    console.error('Failed to copy:', err)
+  }
 }
 </script>
 
