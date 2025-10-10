@@ -24,6 +24,19 @@ class ScrapeRequest(BaseModel):
         return v
 
 
+class RetryRequest(BaseModel):
+    """Request to retry failed URLs"""
+    urls: List[str] = Field(..., min_items=1, description="List of URLs to retry")
+
+
+class FailedURL(BaseModel):
+    """Represents a URL that failed to scrape"""
+    url: str
+    error: str
+    attempted_at: datetime = Field(default_factory=datetime.utcnow)
+    retry_count: int = 0
+
+
 class ContentBlock(BaseModel):
     """Represents a block of content (text or image)"""
     type: str  # 'text' or 'image'
@@ -56,7 +69,8 @@ class ScrapeResponse(BaseModel):
     sitemap: Optional[SitemapData] = None
     pages: Optional[List[PageData]] = None
     total_pages_scraped: int = 0
-    errors: List[str] = []
+    failed_urls: List[FailedURL] = []  # Structured failed URLs
+    errors: List[str] = []  # General errors
 
 
 class JobSummary(BaseModel):
