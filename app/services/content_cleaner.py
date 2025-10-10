@@ -1,16 +1,21 @@
-from bs4 import BeautifulSoup
+from bs4 import BeautifulSoup, NavigableString, Tag
 import re
 from typing import List, Dict, Optional
 
 
 class ContentCleaner:
-    """Clean and extract readable text from HTML content"""
+    """Clean and extract readable text from HTML content with image positions preserved"""
 
     SKIP_TAGS = {'script', 'style', 'meta', 'link', 'noscript', 'iframe', 'svg', 'head'}
 
     @staticmethod
-    def clean_html_to_text(html_content: str) -> str:
-        """Convert HTML to clean, readable text"""
+    def clean_html_to_structured_content(html_content: str, base_url: str) -> List[Dict]:
+        """
+        Convert HTML to structured content preserving image positions
+        Returns a list of content blocks (text or image)
+        """
+        from urllib.parse import urljoin
+
         soup = BeautifulSoup(html_content, 'lxml')
 
         # Remove unwanted tags
@@ -18,25 +23,64 @@ class ContentCleaner:
             tag.decompose()
 
         # Remove comments
-        for comment in soup.findAll(text=lambda text: isinstance(text, str) and text.startswith('<!--')):
+        for comment in soup.findAll(text=lambda text: isinstance(text, str) and text.strip().startswith('<!--')):
             comment.extract()
 
-        # Get text
-        text = soup.get_text(separator='\n', strip=True)
+        # Find main content area (body)
+        body = soup.find('body') or soup
 
-        # Clean up whitespace
-        lines = [line.strip() for line in text.splitlines()]
-        lines = [line for line in lines if line]
+        content_blocks = []
 
-        # Remove excessive newlines
-        text = '\n'.join(lines)
-        text = re.sub(r'\n{3,}', '\n\n', text)
+        def process_element(element, depth=0):
+            """Recursively process elements maintaining structure"""
+            if isinstance(element, NavigableString):
+                text = str(element).strip()
+                if text:
+                    content_blocks.append({
+                        'type': 'text',
+                        'content': text
+                    })
+            elif isinstance(element, Tag):
+                if element.name == 'img':
+                    src = element.get('src') or element.get('data-src')
+                    if src:
+                        full_url = urljoin(base_url, src)
+                        content_blocks.append({
+                            'type': 'image',
+                            'url': full_url,
+                            'alt': element.get('alt', ''),
+                            'title': element.get('title', '')
+                        })
+                elif element.name in ['p', 'div', 'article', 'section', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'li', 'td',
+                                      'th']:
+                    # Process children recursively
+                    for child in element.children:
+                        process_element(child, depth + 1)
+                    # Add spacing after block elements
+                    if element.name in ['p', 'div', 'article', 'section', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6']:
+                        if content_blocks and content_blocks[-1]['type'] == 'text':
+                            content_blocks.append({'type': 'text', 'content': '\n'})
+                else:
+                    for child in element.children:
+                        process_element(child, depth + 1)
 
-        return text.strip()
+        process_element(body)
+
+        # Clean up consecutive whitespace and empty blocks
+        cleaned_blocks = []
+        for block in content_blocks:
+            if block['type'] == 'text':
+                text = re.sub(r'\s+', ' ', block['content']).strip()
+                if text and text != '\n':
+                    cleaned_blocks.append({'type': 'text', 'content': text})
+            else:
+                cleaned_blocks.append(block)
+
+        return cleaned_blocks
 
     @staticmethod
-    def extract_images(html_content: str, base_url: str) -> List[Dict[str, str]]:
-        """Extract all images from HTML"""
+    def extract_all_images(html_content: str, base_url: str) -> List[str]:
+        """Extract all image URLs from HTML"""
         from urllib.parse import urljoin
 
         soup = BeautifulSoup(html_content, 'lxml')
@@ -46,12 +90,9 @@ class ContentCleaner:
             src = img.get('src') or img.get('data-src')
             if src:
                 full_url = urljoin(base_url, src)
-                images.append({
-                    'url': full_url,
-                    'alt_text': img.get('alt', ''),
-                })
+                images.append(full_url)
 
-        return images
+        return list(set(images))  # Remove duplicates
 
     @staticmethod
     def extract_metadata(html_content: str) -> Dict[str, str]:
@@ -82,5 +123,14 @@ class ContentCleaner:
         og_desc = soup.find('meta', attrs={'property': 'og:description'})
         if og_desc:
             metadata['og_description'] = og_desc.get('content', '')
+
+        og_image = soup.find('meta', attrs={'property': 'og:image'})
+        if og_image:
+            metadata['og_image'] = og_image.get('content', '')
+
+        # Author
+        author = soup.find('meta', attrs={'name': 'author'})
+        if author:
+            metadata['author'] = author.get('content', '')
 
         return metadata
