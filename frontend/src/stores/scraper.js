@@ -120,6 +120,20 @@ export const useScraperStore = defineStore('scraper', () => {
         }
     }
 
+    async function retryFailedUrls(jobId, urls) {
+        try {
+            const response = await api.retryFailedUrls(jobId, urls)
+
+            // Start polling for this job
+            pollJobStatus(jobId)
+
+            return response.data
+        } catch (err) {
+            console.error('Failed to retry URLs:', err)
+            throw err
+        }
+    }
+
     return {
         jobs,
         currentJob,
@@ -134,6 +148,7 @@ export const useScraperStore = defineStore('scraper', () => {
         getJobStatus,
         pollJobStatus,
         loadAllJobs,
-        deleteJob
+        deleteJob,
+        retryFailedUrls
     }
 })
