@@ -11,7 +11,7 @@ from datetime import datetime
 import json
 import csv
 
-from app.models.schemas import PageData, SitemapData
+from app.models.schemas import PageData, SitemapData, FailedURL
 from app.services.content_cleaner import ContentCleaner
 from app.utils.validators import URLValidator
 from config import settings
@@ -31,7 +31,7 @@ class WebScraper:
         '.xml', '.json', '.csv', '.txt'
     }
 
-    def __init__(self, base_url: str, max_depth: int = 3):
+    def __init__(self, base_url: str, max_depth: int = 3, existing_output_dir: Optional[str] = None):
         self.base_url = URLValidator.normalize_url(base_url)
         self.base_domain = urlparse(base_url).netloc
         self.max_depth = max_depth
@@ -39,17 +39,21 @@ class WebScraper:
         self.visited_urls: Set[str] = set()
         self.url_hierarchy: Dict[str, List[str]] = {}  # Parent -> Children mapping
         self.scraped_pages: List[PageData] = []
+        self.failed_urls: List[FailedURL] = []  # Track failed URLs with details
         self.errors: List[str] = []
 
         self.browser: Optional[Browser] = None
         self.content_cleaner = ContentCleaner()
         self.validator = URLValidator()
 
-        # Create output directory
-        self.directory_name = self._create_url_based_directory()
-        self.output_dir = Path(settings.OUTPUT_DIR) / self.directory_name
-        self.output_dir.mkdir(parents=True, exist_ok=True)
+        # Create or use existing output directory
+        if existing_output_dir:
+            self.output_dir = Path(existing_output_dir)
+        else:
+            self.directory_name = self._create_url_based_directory()
+            self.output_dir = Path(settings.OUTPUT_DIR) / self.directory_name
 
+        self.output_dir.mkdir(parents=True, exist_ok=True)
         print(f"📁 Output directory: {self.output_dir}")
 
     def _create_url_based_directory(self) -> str:
@@ -172,7 +176,7 @@ class WebScraper:
             hierarchy=self.url_hierarchy
         )
 
-    async def scrape_page(self, url: str) -> Optional[PageData]:
+    async def scrape_page(self, url: str, retry_count: int = 0) -> Optional[PageData]:
         """Scrape a single page with structured content"""
         try:
             context = await self.browser.new_context(
@@ -207,7 +211,17 @@ class WebScraper:
             )
 
         except Exception as e:
-            self.errors.append(f"Page scraping error {url}: {str(e)}")
+            error_msg = f"Page scraping error {url}: {str(e)}"
+            self.errors.append(error_msg)
+
+            # Add to failed URLs list
+            self.failed_urls.append(FailedURL(
+                url=url,
+                error=str(e),
+                attempted_at=datetime.utcnow(),
+                retry_count=retry_count
+            ))
+
             return None
 
     async def scrape_all_pages(self, urls: List[str]) -> List[PageData]:
@@ -230,6 +244,42 @@ class WebScraper:
         print(f"✅ Scraped {len(scraped)} pages successfully")
         return scraped
 
+    async def retry_failed_urls(self, urls_to_retry: List[str], existing_sitemap: Optional[SitemapData] = None) -> Dict:
+        """Retry scraping specific failed URLs"""
+        print(f"🔄 Retrying {len(urls_to_retry)} failed URLs...")
+
+        try:
+            await self.initialize_browser()
+
+            # Update retry count for these URLs
+            for failed_url in self.failed_urls:
+                if failed_url.url in urls_to_retry:
+                    failed_url.retry_count += 1
+
+            # Scrape the URLs
+            scraped_pages = await self.scrape_all_pages(urls_to_retry)
+
+            # Remove successfully scraped URLs from failed list
+            successfully_scraped = {page.url for page in scraped_pages}
+            self.failed_urls = [f for f in self.failed_urls if f.url not in successfully_scraped]
+
+            # Update or append results
+            await self._save_results(existing_sitemap, scraped_pages, is_retry=True)
+
+            print(f"✅ Retry complete! {len(scraped_pages)} pages scraped successfully")
+
+            return {
+                "sitemap": existing_sitemap,
+                "pages": scraped_pages,
+                "total_pages": len(scraped_pages),
+                "failed_urls": self.failed_urls,
+                "errors": self.errors,
+                "output_directory": str(self.output_dir)
+            }
+
+        finally:
+            await self.close_browser()
+
     async def run_full_scrape(self) -> Dict:
         """Execute complete scraping process"""
         try:
@@ -251,6 +301,7 @@ class WebScraper:
                 "sitemap": sitemap,
                 "pages": scraped_pages,
                 "total_pages": len(scraped_pages),
+                "failed_urls": self.failed_urls,
                 "errors": self.errors,
                 "output_directory": str(self.output_dir)
             }
@@ -258,37 +309,69 @@ class WebScraper:
         finally:
             await self.close_browser()
 
-    async def _save_results(self, sitemap: SitemapData, pages: List[PageData]):
+    async def _save_results(self, sitemap: Optional[SitemapData], pages: List[PageData], is_retry: bool = False):
         """Save scraping results to JSON and CSV"""
 
-        # Save hierarchical sitemap as JSON
-        sitemap_file = self.output_dir / "sitemap.json"
-        async with aiofiles.open(sitemap_file, 'w', encoding='utf-8') as f:
-            await f.write(json.dumps({
-                'total_urls': sitemap.total_urls,
-                'base_url': self.base_url,
-                'scraped_at': datetime.utcnow().isoformat(),
-                'hierarchy': sitemap.hierarchy,
-                'urls': sitemap.urls
-            }, indent=2, default=str))
+        # For retries, load existing data and merge
+        if is_retry:
+            # Load existing pages
+            pages_json_file = self.output_dir / "pages.json"
+            if pages_json_file.exists():
+                async with aiofiles.open(pages_json_file, 'r', encoding='utf-8') as f:
+                    content = await f.read()
+                    existing_pages_data = json.loads(content)
 
-        # Save all pages as JSON
-        pages_json_file = self.output_dir / "pages.json"
-        pages_data = []
+                # Remove old versions of retried pages and add new ones
+                retried_urls = {page.url for page in pages}
+                existing_pages_data = [p for p in existing_pages_data if p['url'] not in retried_urls]
 
-        for page in pages:
-            page_dict = {
-                'url': page.url,
-                'title': page.title,
-                'metadata': page.metadata,
-                'structured_content': page.structured_content,
-                'all_images': page.all_images,
-                'scraped_at': page.scraped_at.isoformat() if page.scraped_at else None
-            }
-            pages_data.append(page_dict)
+                # Add new pages
+                for page in pages:
+                    existing_pages_data.append({
+                        'url': page.url,
+                        'title': page.title,
+                        'metadata': page.metadata,
+                        'structured_content': page.structured_content,
+                        'all_images': page.all_images,
+                        'scraped_at': page.scraped_at.isoformat() if page.scraped_at else None
+                    })
 
-        async with aiofiles.open(pages_json_file, 'w', encoding='utf-8') as f:
-            await f.write(json.dumps(pages_data, indent=2, ensure_ascii=False))
+                # Save merged data
+                async with aiofiles.open(pages_json_file, 'w', encoding='utf-8') as f:
+                    await f.write(json.dumps(existing_pages_data, indent=2, ensure_ascii=False))
+
+                pages = [PageData(**p) for p in existing_pages_data]
+
+        # Save hierarchical sitemap as JSON (if provided)
+        if sitemap:
+            sitemap_file = self.output_dir / "sitemap.json"
+            async with aiofiles.open(sitemap_file, 'w', encoding='utf-8') as f:
+                await f.write(json.dumps({
+                    'total_urls': sitemap.total_urls,
+                    'base_url': self.base_url,
+                    'scraped_at': datetime.utcnow().isoformat(),
+                    'hierarchy': sitemap.hierarchy,
+                    'urls': sitemap.urls
+                }, indent=2, default=str))
+
+        # Save all pages as JSON (new or updated)
+        if not is_retry:
+            pages_json_file = self.output_dir / "pages.json"
+            pages_data = []
+
+            for page in pages:
+                page_dict = {
+                    'url': page.url,
+                    'title': page.title,
+                    'metadata': page.metadata,
+                    'structured_content': page.structured_content,
+                    'all_images': page.all_images,
+                    'scraped_at': page.scraped_at.isoformat() if page.scraped_at else None
+                }
+                pages_data.append(page_dict)
+
+            async with aiofiles.open(pages_json_file, 'w', encoding='utf-8') as f:
+                await f.write(json.dumps(pages_data, indent=2, ensure_ascii=False))
 
         # Save pages as CSV
         pages_csv_file = self.output_dir / "pages.csv"
@@ -327,14 +410,24 @@ class WebScraper:
 
                 await f.writelines(csv_data)
 
-        # Save summary
+        # Save summary with failed URLs
         summary_file = self.output_dir / "summary.json"
         summary = {
             'website': self.base_url,
             'scraped_at': datetime.utcnow().isoformat(),
-            'total_urls_discovered': len(sitemap.urls),
+            'total_urls_discovered': sitemap.total_urls if sitemap else len(pages),
             'pages_scraped': len(pages),
             'total_images_found': sum(len(p.all_images) for p in pages),
+            'failed_urls_count': len(self.failed_urls),
+            'failed_urls': [
+                {
+                    'url': f.url,
+                    'error': f.error,
+                    'attempted_at': f.attempted_at.isoformat(),
+                    'retry_count': f.retry_count
+                }
+                for f in self.failed_urls
+            ],
             'errors_count': len(self.errors),
             'errors': self.errors[:50],  # Limit errors
             'max_depth': self.max_depth,
